@@ -7,6 +7,9 @@
     <RootNamespace>QuantumClient</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+  <ItemGroup>
     <Reference Include="dotnetOQS">
       <HintPath>..\..\_others\liboqs-dotnet\bin\Release\dotnetOQS\dotnetOQS.dll</HintPath>
     </Reference>

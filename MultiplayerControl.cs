@@ -1,9 +1,14 @@
 using Godot;
+using Newtonsoft.Json;
 using OpenQuantumSafe;
 using quantum;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.Diagnostics;
 using System.Linq;
+using System.Text;
+using System.Threading;
 
 public partial class MultiplayerControl : Control
 {
@@ -19,17 +24,19 @@ public partial class MultiplayerControl : Control
 
     public byte[] publicKey;
 
-    public IDictionary<int, byte[]> othersPublicKey = new Dictionary<int, byte[]>();
+    public Dictionary<int, byte[]> othersPublicKey = new Dictionary<int, byte[]>();
 
     private byte[] privateKey;
 
-    private IDictionary<int, byte[]> sharedSecret = new Dictionary<int, byte[]>();
+    private Dictionary<int, byte[]> sharedSecret = new Dictionary<int, byte[]>();
 
     private string kemType = "Kyber512";
 
     private KEM kem;
 
     private List<Player> playerList = new List<Player>();
+
+    private AesContext _aes = new AesContext();
 
     public override void _Ready()
     {
@@ -52,7 +59,32 @@ public partial class MultiplayerControl : Control
     {
         GD.Print("Connected To Server");
         keyEncapsulationMechanism();
-        RpcId(1, "sendPlayer", GetNode<LineEdit>("Username").Text, GetNode<LineEdit>("Password").Text, Multiplayer.GetUniqueId());
+    }
+
+    public void sendPlayer()
+    {
+        Player player = new Player()
+        {
+            Name = GetNode<LineEdit>("Username").Text,
+            Password = GetNode<LineEdit>("Password").Text,
+            Id = Multiplayer.GetUniqueId()
+        };
+
+
+        _aes.Start(AesContext.Mode.EcbEncrypt, sharedSecret[1]);
+        byte[] byteArray = quantum.ObjectToByteArray(player); 
+        int length = byteArray.Length;
+        quantum.PadToMultipleOf(ref byteArray, 16);
+        byte[] encryptedPlayer = _aes.Update(byteArray);
+        _aes.Finish();
+
+        _aes.Start(AesContext.Mode.EcbEncrypt, sharedSecret[1]);
+        byte[] len = BitConverter.GetBytes(length);
+        quantum.PadToMultipleOf(ref len, 16);
+        byte[] encryptedLen = _aes.Update(len);
+        _aes.Finish();
+
+        RpcId(1, "receivePlayer", encryptedPlayer, encryptedLen);
     }
 
     private void PeerDisconnected(long id)
@@ -89,7 +121,6 @@ public partial class MultiplayerControl : Control
     public void _on_host_button_down()
     {
         hostGame();
-        sendPlayer(GetNode<LineEdit>("Username").Text, GetNode<LineEdit>("Password").Text, 1);
     }
 
     public void _on_join_button_down()
@@ -116,23 +147,34 @@ public partial class MultiplayerControl : Control
     }
 
     [Rpc(MultiplayerApi.RpcMode.AnyPeer)]
-    private void sendPlayer(string name, string password, int id)
-    { // TODO edit this with KEM, securely store the password?
-        Player player = new Player()
-        {
-            Name = name,
-            Password = password,
-            Id = id
-        };
+    private void receivePlayer(byte[] playerEncrypted, byte[] lengthEncrypted)
+    {
+        int id = Multiplayer.GetRemoteSenderId();
+        _aes.Start(AesContext.Mode.EcbDecrypt, sharedSecret[id]);
+        byte[] lengthDecrypted = _aes.Update(lengthEncrypted);
+        _aes.Finish();
+        Array.Resize(ref lengthDecrypted, 4);
+        int length = BitConverter.ToInt32(lengthDecrypted, 0);
+
+        _aes.Start(AesContext.Mode.EcbDecrypt, sharedSecret[id]);
+        byte[] playerDecrypted = _aes.Update(playerEncrypted);
+        _aes.Finish();
+        quantum.Unpad(ref playerDecrypted, length);
+        string str = Encoding.ASCII.GetString(playerDecrypted);
+        Player player = JsonConvert.DeserializeObject<Player>(str);
 
         playerList.Add(player);
+        GD.Print(JsonConvert.SerializeObject(player));
     }
 
     [Rpc(MultiplayerApi.RpcMode.AnyPeer)]
     private void keyEncapsulationMechanism() // CLIENT
     {
-        setKeys(); // client generates its key pair
-        RpcId(1, "receiveKey", publicKey); // sends the public key to server
+        if (publicKey == null)
+        {
+            setKeys(); // client generates its key pair
+            RpcId(1, "receiveKey", publicKey); // sends the public key to server
+        }
     }
 
     private void setKeys()
@@ -164,5 +206,6 @@ public partial class MultiplayerControl : Control
         quantum.Decapsulate(kem, ciphertext, out secret, privateKey); // the client gets the shared secret from the ciphertext
         sharedSecret.Add(1, secret); // now they have a shared secret that matches
         GD.Print("Secret client:" + string.Join(", ", secret));
+        sendPlayer();
     }
 }
